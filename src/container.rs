@@ -1,51 +1,82 @@
 use nix::sched::{clone, CloneFlags};
-use nix::sys::wait::waitpid;
-use nix::unistd::{execve, fork, ForkResult};
+use nix::sys::wait::{waitpid, WaitStatus};
+use nix::unistd::{execvp, fork, ForkResult};
 use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
 
-pub fn run(command: &str) -> nix::Result<()> {
+pub fn run(command: Vec<String>) -> nix::Result<()> {
     let flags = CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNS;
 
-    let command = command.to_string();
     match clone(
-        Box::new(|| child_func(&command)),
+        Box::new(move || child_func(&command)),
         &mut [0u8; 1024 * 1024],
         flags,
         None,
     ) {
         Ok(pid) => {
             println!("Started container with PID {}", pid);
-            waitpid(pid, None)?;
-            Ok(())
+            match waitpid(pid, None) {
+                Ok(WaitStatus::Exited(_, status)) => {
+                    println!("Container exited with status: {}", status);
+                    Ok(())
+                }
+                Ok(status) => {
+                    println!("Container exited with unexpected status: {:?}", status);
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("Error waiting for container: {:?}", e);
+                    Err(e)
+                }
+            }
         }
         Err(err) => Err(err),
     }
 }
 
-fn child_func(command: &str) -> isize {
+fn child_func(command: &[String]) -> isize {
+    println!("Child function started");
     if let Err(e) = mount_proc() {
-        eprintln!("Failed to mount proc: {}", e);
+        eprintln!("Failed to mount proc: {:?}", e);
         return -1;
     }
 
+    println!("Proc mounted successfully");
+
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child }) => {
-            waitpid(child, None).expect("waitpid failed");
-            0
+            println!("Forked child with PID: {:?}", child);
+            match waitpid(child, None) {
+                Ok(status) => {
+                    println!("Child exited with status: {:?}", status);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error waiting for child: {:?}", e);
+                    -1
+                }
+            }
         }
         Ok(ForkResult::Child) => {
-            let args: Vec<&str> = command.split_whitespace().collect();
-            let prog = CString::new(args[0]).unwrap();
-            let args: Vec<CString> = args.iter().map(|&s| CString::new(s).unwrap()).collect();
+            println!("In child process, preparing to exec");
+            let prog = CString::new(command[0].clone()).unwrap();
+            let args: Vec<CString> = command
+                .iter()
+                .map(|s| CString::new(s.as_str()).unwrap())
+                .collect();
 
-            // Create an empty environment
-            let env: Vec<CString> = Vec::new();
-
-            execve(&prog, &args, &env).expect("execve failed");
-            unreachable!();
+            println!("Executing command: {:?}", command);
+            match execvp(&prog, &args) {
+                Ok(_) => unreachable!(),
+                Err(e) => {
+                    eprintln!("execvp failed: {:?}", e);
+                    -1
+                }
+            }
         }
-        Err(_) => -1,
+        Err(e) => {
+            eprintln!("Fork failed: {:?}", e);
+            -1
+        }
     }
 }
 

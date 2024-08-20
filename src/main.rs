@@ -12,18 +12,28 @@ fn main() {
                 Arg::with_name("command")
                     .help("The command to run")
                     .required(true)
-                    .takes_value(true),
+                    .multiple(true),
             ),
         )
         .get_matches();
 
+    if !nix::unistd::Uid::effective().is_root() {
+        eprintln!("Error: This program needs to be run with root privileges. Please use sudo.");
+        exit(1);
+    }
+
     match matches.subcommand() {
         Some(("run", run_matches)) => {
-            let command = run_matches.value_of("command").unwrap();
+            let command: Vec<String> = run_matches
+                .values_of("command")
+                .unwrap()
+                .map(String::from)
+                .collect();
+            println!("Attempting to run command: {:?}", command);
             match container::run(command) {
                 Ok(_) => println!("Container exited successfully"),
                 Err(e) => {
-                    eprintln!("Error running container: {}", e);
+                    eprintln!("Error running container: {:?}", e);
                     exit(1);
                 }
             }
